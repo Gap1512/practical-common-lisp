@@ -1,0 +1,5 @@
+(defparameter *set* ())
+(adjoin 1 *set*)
+(setf *set* (adjoin 1 *set*))
+(pushnew 2 *set*)
+(pushnew 2 *set*)
