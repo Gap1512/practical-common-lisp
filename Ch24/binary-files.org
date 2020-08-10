@@ -1,0 +1,269 @@
+#+OPTIONS: ':nil *:t -:t ::t <:t H:3 \n:nil ^:t arch:headline
+#+OPTIONS: author:t broken-links:nil c:nil creator:nil
+#+OPTIONS: d:(not "LOGBOOK") date:nil e:t email:nil f:t inline:t num:t
+#+OPTIONS: p:nil pri:nil prop:nil stat:t tags:t tasks:t tex:t
+#+OPTIONS: timestamp:t title:t toc:nil todo:t |:t
+#+TITLE: Practical: Parsing Binary Files
+#+DATE: <2020-05-06 qua>
+#+AUTHOR: Gustavo Alves Pacheco
+#+EMAIL: gap1512@gmail.com
+#+LANGUAGE: pt-BR
+#+SELECT_TAGS: export
+#+EXCLUDE_TAGS: noexport
+#+CREATOR: Emacs 26.3 (Org mode 9.1.9)
+
+Definindo o pacote do qual o arquivo faz parte:
+
+#+HEADER: :tangle "binary-data.lisp"
+#+BEGIN_SRC lisp
+  ;binary-data.lisp
+
+  (in-package #:binary-data)
+#+END_SRC
+
+#+RESULTS:
+: #<PACKAGE "BINARY-DATA">
+
+Para transformar um slot da macro do tipo:
+
+#+BEGIN_EXAMPLE lisp
+  (major-version u1)
+#+END_EXAMPLE
+
+Em um slot válido para /defclass/, que é da forma:
+
+#+BEGIN_EXAMPLE lisp
+  (major-version :initarg :major-version :accessor major-version)
+#+END_EXAMPLE
+
+Deve-se desenvolver uma função que transforme um símbolo em uma keyword. Isto
+é feito da seguinte forma:
+
+#+HEADER: :tangle "binary-data.lisp"
+#+BEGIN_SRC lisp
+  (defun as-keyword (sym)
+    (intern (string sym) :keyword))
+#+END_SRC
+
+#+RESULTS:
+: AS-KEYWORD
+
+Em seguida, uma função que recebe um especificador de slot e return um
+slot válido, dessa forma:
+
+#+HEADER: :tangle "binary-data.lisp"
+#+BEGIN_SRC lisp
+  (defun slot->defclass-slot (spec)
+    (let ((name (first spec)))
+      `(,name :initarg ,(as-keyword name) :accessor ,name)))
+#+END_SRC
+
+#+RESULTS:
+: SLOT->DEFCLASS-SLOT
+
+Testando a função:
+
+#+BEGIN_EXAMPLE
+  (slot->defclass-slot '(major-version u1))
+#+END_EXAMPLE
+
+A primeira versão de /define-binary-class/, então, é trivial:
+
+#+BEGIN_SRC lisp
+  (defmacro define-binary-class (name slots)
+    `(defclass ,name ()
+       ,(mapcar #'slot->defclass-slot slots)))
+#+END_SRC
+
+#+RESULTS:
+: DEFINE-BINARY-CLASS
+
+Entretanto, deve-se gerar funções de leitura e escrita de instancias da classe.
+Para evitar que a macro gere símbolos que não serão passados como argumentos
+para a definição da binary-class, é recomendado, ao invés, que se crie uma 
+função genérica /read-value/, que receba o tipo e a stream, e possivelmente,
+keywords.
+
+#+HEADER: :tangle "binary-data.lisp"
+#+BEGIN_SRC lisp
+  (defgeneric read-value (type stream &key)
+    (:documentation "Read a value of the given type from the stream."))
+#+END_SRC
+
+Assim, quando uma classe for criada, um método é estabelecido,
+da seguinte forma:
+
+#+BEGIN_EXAMPLE lisp
+  (defmethod read-value ((type (eql 'id3-tag)) in &key)
+    (let ((object (make-instance 'id3-tag)))
+      (with-slots (identifier major-version revision flags size frames) object
+	(setf identifier (read-value 'iso-8859-1-string in :length 3))
+	(setf major-version (read-value 'u1 in))
+	(setf revision (read-value 'u1 in))
+	(setf flags (read-value 'u1 in))
+	(setf size (read-value 'id3-encoded-size in))
+	(setf frames (read-value 'id3-frames in :tag-size size)))
+	object)) 
+#+END_EXAMPLE
+
+Desta forma, ainda é necessário transformar uma chamada do tipo
+
+#+BEGIN_EXAMPLE lisp
+  (identifier (iso-8859-1-string :length 3))
+#+END_EXAMPLE
+
+Em:
+
+#+BEGIN_EXAMPLE lisp
+  (setf identifier (read-value 'iso-8859-1-string in :length 3))
+#+END_EXAMPLE
+
+A implementação de slot->read-value se dá da seguinte forma:
+
+#+HEADER: :tangle "binary-data.lisp"
+#+BEGIN_SRC lisp
+  (defun slot->read-value (spec stream)
+    (destructuring-bind (name (type &rest args)) (normalize-slot-spec spec)
+      `(setf ,name (read-value ',type ,stream ,@args))))
+
+  (defun normalize-slot-spec (spec)
+    (list (first spec) (mklist (second spec))))
+
+  (defun mklist (x)
+    (if (listp x) x  (list x)))
+#+END_SRC
+
+#+RESULTS:
+: MKLIST
+
+Assim, /define-binary-class/ pode ser aprimorada, da seguinte forma:
+
+#+BEGIN_SRC lisp
+  (defmacro define-binary-class (name slots)
+    (with-gensyms (typevar objectvar streamvar)
+      `(progn
+	 (defclass ,name ()
+	   ,(mapcar #'slot->defclass-slot slots))
+	 (defmethod read-value ((,typevar (eql ',name)) ,streamvar &key)
+	   (let ((,objectvar (make-instance ',name)))
+	     (with-slots ,(mapcar #'first slots) ,objectvar
+	       ,@(mapcar #'(lambda (x) (slot->read-value x streamvar)) slots))
+	     ,objectvar)))))
+#+END_SRC
+
+#+RESULTS:
+: DEFINE-BINARY-CLASS
+
+Para escrever objetos binários, um processo semelhante é feito.
+Definindo a função genérica:
+
+#+HEADER: :tangle "binary-data.lisp"
+#+BEGIN_SRC lisp
+  (defgeneric write-value (type stream value &key)
+    (:documentation "Write a value as the given type to the stream."))
+#+END_SRC
+
+#+RESULTS:
+: #<STANDARD-GENERIC-FUNCTION BINARY-DATA:WRITE-VALUE (0)>
+
+Definindo a função que transforma um slot em uma chamada para /write-value/:
+
+#+HEADER: :tangle "binary-data.lisp"
+#+BEGIN_SRC lisp
+  (defun slot->write-value (spec stream)
+    (destructuring-bind (name (type &rest args)) (normalize-slot-spec spec)
+      `(write-value ',type ,stream ,name ,@args)))
+#+END_SRC
+
+E adicionando o /write-value/ na macro /define-binary-class/:
+
+#+BEGIN_SRC lisp
+  (defmacro define-binary-class (name slots)
+    (with-gensyms (typevar objectvar streamvar)
+	`(progn
+	   (defclass ,name ()
+	     ,(mapcar #'slot->defclass-slot slots))
+	   (defmethod read-value ((,typevar (eql ',name)) ,streamvar &key)
+	     (let ((,objectvar (make-instance ',name)))
+	       (with-slots ,(mapcar #'first slots) ,objectvar
+		 ,@(mapcar #'(lambda (x) (slot->read-value x streamvar)) slots))
+	       ,objectvar))
+	   (defmethod write-value ((,typevar (eql ',name)) ,streamvar ,objectvar &key)
+	     (with-slots ,(mapcar #'first slots) ,objectvar
+	       ,@(mapcar #'(lambda (x) (slot->write-value x streamvar)) slots))))))
+#+END_SRC
+
+#+RESULTS:
+: DEFINE-BINARY-CLASS
+
+É interessante que a classe binária aceite herança. Para isso, 
+deve-se redefinir =define-binary-class=, inserindo um parâmetro
+relacionado a lista de superclasses.
+
+#+BEGIN_EXAMPLE lisp
+  (defmacro define-binary-class (name (&rest superclasses) slots)...
+#+END_EXAMPLE
+
+E no template do =defclass= este parâmetro é incorporado.
+
+#+BEGIN_EXAMPLE lisp
+  (defclass ,name ,superclasses
+    ...)
+#+END_EXAMPLE
+
+Além disso, também é necessário modificar =read-value= e =write-value= para 
+que seja possível usar os métodos em subclasses com slots herdados.
+=read-value= é dividido, assim, em duas partes, sendo uma responsável por
+instanciar o tipo correto de objeto e outra responsável por preencher
+os slots. No lado da escrita, o processo é semelhante, mas mais simples.
+Então duas funções genéricas são definidas, ambas recebendo um objeto e uma
+stream.  Os métodos nessas funções genéricas serão responsáveis por
+ler e escrever os slots específicos da classe do objeto as quais eles pertencem.
+
+#+HEADER: :tangle "binary-data.lisp"
+#+BEGIN_SRC lisp
+  (defgeneric read-object (object stream)
+    (:method-combination progn :most-specific-last)
+    (:documentation "Fill in the slots of object from stream."))
+
+  (defgeneric write-object (object stream)
+    (:method-combination progn :most-specific-last)
+    (:documentation "Write out the slots of object to the stream."))
+#+END_SRC
+
+
+Assim, não é necessário criar =read-values= e =write-values= específicos. Apenas
+assume-se que o que o tipo argumento é o nome de uma classe binária:
+
+#+BEGIN_SRC lisp
+  (defmethod read-value ((type symbol) stream &key)
+    (let ((object (make-instance type)))
+      (read-object object stream)
+      object))
+
+  (defmethod write-value ((type symbol) stream value &key)
+    (assert (typep value type))
+    (write-object value stream))
+#+END_SRC
+
+As mudanças em =define-binary-class= para definir métodos em =read-object= e 
+=write-object= ao invés de =read-value= e =write-value= são mínimas:
+
+#+BEGIN_SRC lisp
+  (defmacro define-binary-class (name superclasses slots)
+    (with-gensyms (objectvar streamvar)
+      `(progn
+       
+	 (defclass ,name ,superclasses
+	   ,(mapcar #'slot->defclass-slot slots))
+
+	 (defmethod read-object progn ((,objectvar ,name) ,streamvar)
+		    (with-slots ,(mapcar #'first slots) ,objectvar
+		      ,@(mapcar #'(lambda (x) (slot->read-value x streamvar)) slots)))
+       
+	 (defmethod write-value ((,objectvar ,name)) ,streamvar)
+	   (with-slots ,(mapcar #'first slots) ,objectvar
+	     ,@(mapcar #'(lambda (x) (slot->write-value x streamvar)) slots)))))
+#+END_SRC
+
+351
